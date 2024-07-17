@@ -1,0 +1,280 @@
+---
+# StorageClass for FusionAuth
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+allowVolumeExpansion: true
+metadata:
+  name: nginx-env-testing-sc
+  namespace: nginx-env-testing-dev
+provisioner: ebs.csi.aws.com
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  type: gp3
+  tagSpecification_1: "bancolombia:environment=dev"
+  tagSpecification_2: "bancolombia:project-name=nginx-env-testing"
+
+
+---
+# PersistentVolumeClaim for FusionAuth
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: nginx-env-testing-pvc
+  namespace: nginx-env-testing-dev
+  labels:
+    app: nginx-env-testing
+    app.krtvelaz.com/env: dev
+    app.krtvelaz.com/project: nginx-env-testing
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: nginx-env-testing-sc
+  resources:
+    requests:
+      storage: 10Gi
+---
+# SecretProviderClass for AWS Secrets Manager
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: nginx-env-testing-sp
+  namespace: nginx-env-testing-dev
+spec:
+  provider: aws
+  parameters:
+    objects: |
+      - objectName: "arn:***:secretsmanager:us-east-1:******:secret:*******-nginx-env-testing-dev-****-secretrds-cnx1"
+        objectType: "secretsmanager"
+        jmesPath:
+          - path: "password"
+            objectAlias: "MySecretPassword"
+          - path: "username"
+            objectAlias: "MySecretUsername"
+  secretObjects:
+    - secretName: nginx-env-testing-secret
+      type: Opaque
+      data:
+        - objectName: MySecretPassword
+          key: password
+        - objectName: MySecretUsername
+          key: username
+
+---
+# ConfigMap for FusionAuth configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-env-testing-config
+  namespace: nginx-env-testing-dev
+data:
+  APP_RUNTIME_MODE: development
+  APP_URL: http://nginx-env-testing:8080
+  FUSIONAUTH_SEARCH_ENGINE_TYPE: database
+  DATABASE_URL: jdbc:postgresql://***/hdsdbdcd?searchpath=nginx-env-testing
+  APP_SILENT_MODE: "true"
+---
+#deployment for FusionAuth
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-env-testing-dep
+  namespace: nginx-env-testing-dev
+  labels:
+    app: nginx-env-testing
+    app.krtvelaz.com/env: dev
+    app.krtvelaz.com/project: nginx-env-testing
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      pod: nginx-env-testing-pod
+  template:
+    metadata:
+      labels:
+        app: nginx-env-testing
+        pod: nginx-env-testing-pod
+    spec:
+      automountServiceAccountToken: false
+      serviceAccountName: nginx-env-testing-iam-sa
+      securityContext:
+        runAsNonRoot: false
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              pod: nginx-env-testing-pod
+      containers:
+        - name: nginx-env-testing-container
+          image: nginx-env-testing:latest
+          imagePullPolicy: Always
+          securityContext:
+            readOnlyRootFilesystem: false
+            runAsNonRoot: false
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - NET_RAW
+                - ALL
+              add: ["NET_BIND_SERVICE"]
+          livenessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 6
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 6
+          startupProbe:
+            httpGet:
+              path: /
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 30
+            timeoutSeconds: 5
+            successThreshold: 1
+            failureThreshold: 10
+          resources:
+            requests:
+              memory: "250Mi"
+              cpu: "700m"
+            limits:
+              memory: "750Mi"
+              cpu: "1500m"
+          env:
+            - name: APP_RUNTIME_MODE
+              valueFrom:
+                configMapKeyRef:
+                  name: nginx-env-testing-config
+                  key: APP_RUNTIME_MODE
+            - name: APP_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: nginx-env-testing-config
+                  key: APP_URL
+            - name: DATABASE_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: nginx-env-testing-config
+                  key: DATABASE_URL
+            - name: APP_SILENT_MODE
+              valueFrom:
+                configMapKeyRef:
+                  name: nginx-env-testing-config
+                  key: APP_SILENT_MODE
+            - name: DATABASE_ROOT_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: nginx-env-testing-secret
+                  key: username
+            - name: DATABASE_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: nginx-env-testing-secret
+                  key: password
+            - name: DATABASE_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: nginx-env-testing-secret
+                  key: username
+            - name: DATABASE_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: nginx-env-testing-secret
+                  key: password
+          ports:
+            - containerPort: 8080
+              name: hds-port
+          volumeMounts:
+            - name: nginx-env-testing-data
+              mountPath: /usr/local/fusionauth/data
+              subPath: data
+            - name: secrets-store-inline
+              mountPath: "/mnt/secrets-store"
+              readOnly: true
+      volumes:
+        - name: nginx-env-testing-data
+          persistentVolumeClaim:
+            claimName: nginx-env-testing-pvc
+        - name: secrets-store-inline
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: "nginx-env-testing-sp"
+---
+# Service for FusionAuth
+apiVersion: v1
+kind: Service
+metadata:
+  name: nginx-env-testing
+  namespace: nginx-env-testing-dev
+  labels:
+    app: nginx-env-testing
+    app.krtvelaz.com/env: dev
+    app.krtvelaz.com/project: nginx-env-testing
+spec:
+  type: ClusterIP
+  ports:
+    - port: 80
+      targetPort: 8080
+      name: hds-port
+  selector:
+    app:  nginx-env-testing
+    pod:  nginx-env-testing-pod
+---
+# Ingress for FusionAuth
+apiVersion: networking.istio.io/v1alpha3
+kind: Gateway
+metadata:
+  name: nginx-env-testing-gw
+  namespace: nginx-env-testing-dev
+spec:
+  selector:
+    istio: ingressgateway
+  servers:
+    - port:
+        number: 80
+        name: http
+        protocol: HTTP
+      hosts:
+        -  nginx-env-testing-dev.apps.xxxxx.com
+        -  xxxxxxint-dev.apps.xxxxx.com
+---
+# Ingress for FusionAuth
+apiVersion: networking.istio.io/v1alpha3
+kind: VirtualService
+metadata:
+  name: nginx-env-testing-vs
+  namespace: nginx-env-testing-dev
+spec:
+  hosts:
+    -  nginx-env-testing-dev.apps.xxxxx.com
+    -  xxxxxxint-dev.apps.xxxxx.com
+  gateways:
+    -  nginx-env-testing-gw
+  http:
+    - match:
+        - uri:
+            prefix: "/nginx-env-testing"
+      rewrite:
+        uri: "/"
+      route:
+        - destination:
+            host: nginx-env-testing
+            port:
+              number: 80
