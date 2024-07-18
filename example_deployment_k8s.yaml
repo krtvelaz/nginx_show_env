@@ -10,8 +10,8 @@ provisioner: ebs.csi.aws.com
 volumeBindingMode: WaitForFirstConsumer
 parameters:
   type: gp3
-  tagSpecification_1: "bancolombia:environment=dev"
-  tagSpecification_2: "bancolombia:project-name=nginx-env-testing"
+  tagSpecification_1: "nginx:environment=dev"
+  tagSpecification_2: "nginx:project-name=nginx-env-testing"
 
 
 ---
